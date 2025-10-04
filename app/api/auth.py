@@ -1,60 +1,81 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import HTTPBearer
 from sqlalchemy.orm import Session
 from datetime import timedelta
+
 from app.database import get_db
 from app.models import Company
 from app.schemas import CompanyCreate, CompanyLogin, CompanyResponse, Token
-from app.auth import authenticate_company, create_access_token, get_password_hash, get_current_company
+from app.core.auth_utils import (
+    get_password_hash,
+    verify_password,
+    create_access_token,
+    get_current_company,
+)
 from app.config import settings
 
-router = APIRouter(prefix="/api/auth", tags=["authentication"])
+router = APIRouter(prefix="/api/auth", tags=["Auth"])
 
+# -------------------------------
+# Register a company
+# -------------------------------
 @router.post("/register", response_model=CompanyResponse)
 async def register(company_data: CompanyCreate, db: Session = Depends(get_db)):
-    # Check if company already exists
+    """Register a new company account"""
+    # Check if email already exists
     existing_company = db.query(Company).filter(Company.email == company_data.email).first()
     if existing_company:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Company with this email already exists"
+            detail="Company with this email already exists",
         )
-    
-    # Create new company
+
+    # Hash password and create new company
     hashed_password = get_password_hash(company_data.password)
     company = Company(
         name=company_data.name,
         email=company_data.email,
-        password_hash=hashed_password
+        password=hashed_password  # 🔑 ensure your Company model has `password` field
     )
-    
+
     db.add(company)
     db.commit()
     db.refresh(company)
-    
-    return CompanyResponse.from_orm(company)
 
+    return company  # Pydantic will convert via CompanyResponse
+
+
+# -------------------------------
+# Login (get JWT token)
+# -------------------------------
 @router.post("/login", response_model=Token)
 async def login(login_data: CompanyLogin, db: Session = Depends(get_db)):
-    company = authenticate_company(db, login_data.email, login_data.password)
-    if not company:
+    """Authenticate company and return access token"""
+    company = db.query(Company).filter(Company.email == login_data.email).first()
+    if not company or not verify_password(login_data.password, company.password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password",
+            detail="Invalid email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
+    # Create JWT
     access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
     access_token = create_access_token(
-        data={"sub": company.email}, expires_delta=access_token_expires
+        data={"sub": str(company.id)},
+        expires_delta=access_token_expires,
     )
-    
+
     return Token(
         access_token=access_token,
         token_type="bearer",
-        company=CompanyResponse.from_orm(company)
+        company=company
     )
 
+
+# -------------------------------
+# Get current logged-in company
+# -------------------------------
 @router.get("/me", response_model=CompanyResponse)
 async def get_me(current_company: CompanyResponse = Depends(get_current_company)):
+    """Return details of the logged-in company"""
     return current_company

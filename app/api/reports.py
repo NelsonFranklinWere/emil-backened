@@ -4,10 +4,12 @@ from typing import List
 import uuid
 import json
 from datetime import datetime
+from app.schemas import CompanyResponse
+
 from app.database import get_db
 from app.models import Report, Job, Application, ApplicationStatus
 from app.schemas import ReportResponse, ReportCreate, JobStatistics
-from app.auth import get_current_company
+from app.core.auth_utils import get_current_company
 from app.services.email_service import EmailService
 from app.services.file_storage import FileStorageService
 

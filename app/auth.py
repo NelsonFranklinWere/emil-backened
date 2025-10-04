@@ -1,65 +1,131 @@
-from datetime import datetime, timedelta
-from typing import Optional
-from jose import JWTError, jwt
-from passlib.context import CryptContext
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy.orm import Session
-from app.database import get_db
-from app.models import Company
-from app.schemas import CompanyResponse
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+import os
+
+from app.database import engine, Base
 from app.config import settings
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-security = HTTPBearer()
+# Import routers (clean + structured)
+from app.api import auth, jobs, applications, reports, webhooks
+from app.models import Company, Job, Application, Report  # Ensure models are registered
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
 
-def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
+# -------------------------------------------------
+# ✅ Database Initialization
+# -------------------------------------------------
+try:
+    Base.metadata.create_all(bind=engine)
+    print("✅ Database tables created successfully!")
+except Exception as e:
+    print(f"❌ Error creating database tables: {e}")
+    print("⚠️ API starting without database connection...")
 
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=settings.access_token_expire_minutes)
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
-    return encoded_jwt
 
-def get_company_by_email(db: Session, email: str) -> Optional[Company]:
-    return db.query(Company).filter(Company.email == email).first()
+# -------------------------------------------------
+# ✅ FastAPI Application
+# -------------------------------------------------
+app = FastAPI(
+    title="Emil AI Recruitment API",
+    description="AI-powered recruitment assistant backend with FastAPI",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
 
-def authenticate_company(db: Session, email: str, password: str) -> Optional[Company]:
-    company = get_company_by_email(db, email)
-    if not company:
-        return None
-    if not verify_password(password, company.password_hash):
-        return None
-    return company
 
-async def get_current_company(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    db: Session = Depends(get_db)
-) -> CompanyResponse:
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    
+# -------------------------------------------------
+# ✅ CORS Configuration
+# -------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        settings.frontend_url,
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# -------------------------------------------------
+# ✅ Static Files (Uploads: resumes, reports)
+# -------------------------------------------------
+os.makedirs(settings.upload_dir, exist_ok=True)
+os.makedirs(os.path.join(settings.upload_dir, "resumes"), exist_ok=True)
+os.makedirs(os.path.join(settings.upload_dir, "reports"), exist_ok=True)
+
+app.mount("/uploads", StaticFiles(directory=settings.upload_dir), name="uploads")
+
+
+# -------------------------------------------------
+# ✅ Routers
+# -------------------------------------------------
+app.include_router(auth.router, prefix="/api/auth", tags=["Auth"])
+app.include_router(jobs.router, prefix="/api/jobs", tags=["Jobs"])
+app.include_router(applications.router, prefix="/api/applications", tags=["Applications"])
+app.include_router(reports.router, prefix="/api/reports", tags=["Reports"])
+app.include_router(webhooks.router, prefix="/api/webhooks", tags=["Webhooks"])
+
+
+# -------------------------------------------------
+# ✅ Health + Status Endpoints
+# -------------------------------------------------
+@app.get("/")
+async def root():
+    """Root endpoint with API info"""
+    return {
+        "message": "Emil AI Recruitment API",
+        "status": "running",
+        "version": "1.0.0",
+        "docs": "/docs"
+    }
+
+
+@app.get("/health")
+async def health_check():
+    """Database + service health check"""
     try:
-        payload = jwt.decode(credentials.credentials, settings.secret_key, algorithms=[settings.algorithm])
-        email: str = payload.get("sub")
-        if email is None:
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
-    
-    company = get_company_by_email(db, email=email)
-    if company is None:
-        raise credentials_exception
-    
-    return CompanyResponse.from_orm(company)
+        with engine.connect() as conn:
+            conn.execute("SELECT 1")
+        db_status = "connected"
+    except Exception:
+        db_status = "disconnected"
+
+    return {
+        "status": "healthy",
+        "version": "1.0.0",
+        "database": db_status,
+        "environment": settings.environment
+    }
+
+
+@app.get("/api/status")
+async def api_status():
+    """API status + available features"""
+    return {
+        "service": "emil-ai-backend",
+        "status": "operational",
+        "features": {
+            "authentication": True,
+            "job_management": True,
+            "applications": True,
+            "reports": True,
+            "webhooks": True,
+        }
+    }
+
+
+# -------------------------------------------------
+# ✅ Run App
+# -------------------------------------------------
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "app.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=settings.environment == "development"
+    )
